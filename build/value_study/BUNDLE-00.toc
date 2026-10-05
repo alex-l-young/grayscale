@@ -1,0 +1,3 @@
+([('value_study',
+   '/Users/alexyoung/Desktop/CS/Art/Grayscale/dist/value_study',
+   'EXECUTABLE')],)
