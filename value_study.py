@@ -16,6 +16,9 @@ class ValueStudyApp:
         self.gray_array = None
         self.tk_image = None
         self.sliders = []
+        self.zoom = 1.0
+        self.fit_mode = True
+        self.img_offset = (0, 0)
 
         # --- UI Layout ---
         # Control Panel (Left Side)
@@ -27,6 +30,18 @@ class ValueStudyApp:
 
         self.save_btn = ttk.Button(self.control_frame, text="Save Result", command=self.save_image, state=tk.DISABLED)
         self.save_btn.pack(pady=10, fill=tk.X)
+
+        ttk.Separator(self.control_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
+
+        # Zoom controls
+        zoom_frame = ttk.Frame(self.control_frame)
+        zoom_frame.pack(fill=tk.X)
+        ttk.Button(zoom_frame, text="\u2212", width=3, command=self.zoom_out).pack(side=tk.LEFT)
+        self.zoom_label = ttk.Label(zoom_frame, text="100%", anchor=tk.CENTER, width=6)
+        self.zoom_label.pack(side=tk.LEFT, expand=True)
+        ttk.Button(zoom_frame, text="+", width=3, command=self.zoom_in).pack(side=tk.LEFT)
+        ttk.Button(self.control_frame, text="Fit to Window", command=self.zoom_fit).pack(pady=(5, 0), fill=tk.X)
+        ttk.Button(self.control_frame, text="Actual Size (100%)", command=self.zoom_actual).pack(pady=(5, 0), fill=tk.X)
 
         ttk.Separator(self.control_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=10)
 
@@ -49,8 +64,32 @@ class ValueStudyApp:
         self.canvas_frame = ttk.Frame(self.root)
         self.canvas_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        self.image_label = tk.Label(self.canvas_frame, text="Load an image to begin", bg="gray")
-        self.image_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.canvas = tk.Canvas(self.canvas_frame, bg="gray", highlightthickness=0)
+        self.hbar = ttk.Scrollbar(self.canvas_frame, orient=tk.HORIZONTAL, command=self.canvas.xview)
+        self.vbar = ttk.Scrollbar(self.canvas_frame, orient=tk.VERTICAL, command=self.canvas.yview)
+        self.canvas.configure(xscrollcommand=self.hbar.set, yscrollcommand=self.vbar.set)
+        self.hbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.image_id = None
+        self.hint_id = self.canvas.create_text(
+            0, 0, text="Load an image to begin", fill="white", tags="hint")
+
+        # Zoom / pan bindings. Command (macOS) or Control (Windows/Linux) + wheel zooms;
+        # plain wheel scrolls; click-drag pans.
+        self.canvas.bind("<Configure>", self.on_canvas_resize)
+        self.canvas.bind("<MouseWheel>", self.on_mousewheel)
+        self.canvas.bind("<Command-MouseWheel>", self.on_zoom_wheel)
+        self.canvas.bind("<Control-MouseWheel>", self.on_zoom_wheel)
+        self.canvas.bind("<Button-4>", lambda e: self.on_zoom_wheel(e, 1) if e.state & 0x4 else self.canvas.yview_scroll(-1, "units"))
+        self.canvas.bind("<Button-5>", lambda e: self.on_zoom_wheel(e, -1) if e.state & 0x4 else self.canvas.yview_scroll(1, "units"))
+        self.canvas.bind("<ButtonPress-1>", lambda e: self.canvas.scan_mark(e.x, e.y))
+        self.canvas.bind("<B1-Motion>", lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        for mod in ("Command", "Control"):
+            self.root.bind(f"<{mod}-plus>", lambda e: self.zoom_in())
+            self.root.bind(f"<{mod}-equal>", lambda e: self.zoom_in())
+            self.root.bind(f"<{mod}-minus>", lambda e: self.zoom_out())
+            self.root.bind(f"<{mod}-Key-0>", lambda e: self.zoom_fit())
 
     def load_image(self):
         file_path = filedialog.askopenfilename(
@@ -68,14 +107,108 @@ class ValueStudyApp:
         # Convert to grayscale
         img = img.convert("L")
 
-        # Resize for performance and display (max 800x800)
-        img.thumbnail((800, 800), Image.Resampling.LANCZOS)
+        # Resize for performance and display (max 2000x2000)
+        img.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
 
         self.original_image = img
         self.gray_array = np.array(self.original_image)
         self.save_btn.config(state=tk.NORMAL)
 
+        self.fit_mode = True
         self.update_sliders()
+
+    # --- Zoom -----------------------------------------------------------
+    MIN_ZOOM, MAX_ZOOM = 0.1, 8.0
+
+    def set_zoom(self, zoom, anchor=None):
+        """Set zoom, keeping the image point under `anchor` (canvas x, y) fixed."""
+        if self.display_image is None:
+            return
+        zoom = max(self.MIN_ZOOM, min(self.MAX_ZOOM, zoom))
+        old = self.zoom
+        if anchor is None:
+            anchor = (self.canvas.winfo_width() / 2, self.canvas.winfo_height() / 2)
+        # Image coordinates under the anchor before zooming
+        ix = (self.canvas.canvasx(anchor[0]) - self.img_offset[0]) / old
+        iy = (self.canvas.canvasy(anchor[1]) - self.img_offset[1]) / old
+        self.zoom = zoom
+        self.render()
+        self.canvas.xview_moveto(0)
+        self.canvas.yview_moveto(0)
+        # Scroll so the same image point sits under the anchor again
+        self.scroll_to(self.img_offset[0] + ix * zoom - anchor[0],
+                       self.img_offset[1] + iy * zoom - anchor[1])
+
+    def scroll_to(self, x, y):
+        _, _, w, h = (float(v) for v in self.canvas.cget("scrollregion").split())
+        if w > 0:
+            self.canvas.xview_moveto(max(0, x) / w)
+        if h > 0:
+            self.canvas.yview_moveto(max(0, y) / h)
+
+    def zoom_in(self):
+        self.fit_mode = False
+        self.set_zoom(self.zoom * 1.25)
+
+    def zoom_out(self):
+        self.fit_mode = False
+        self.set_zoom(self.zoom / 1.25)
+
+    def zoom_actual(self):
+        self.fit_mode = False
+        self.set_zoom(1.0)
+
+    def zoom_fit(self):
+        if self.display_image is None:
+            return
+        self.fit_mode = True
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        iw, ih = self.display_image.size
+        self.set_zoom(min(cw / iw, ch / ih))
+
+    def on_zoom_wheel(self, event, direction=None):
+        if direction is None:
+            direction = 1 if event.delta > 0 else -1
+        self.fit_mode = False
+        self.set_zoom(self.zoom * (1.1 ** direction), anchor=(event.x, event.y))
+
+    def on_mousewheel(self, event):
+        if event.state & 0x4 or event.state & 0x8:  # Ctrl / Command held
+            return self.on_zoom_wheel(event)
+        # macOS reports small deltas, Windows reports multiples of 120
+        step = -event.delta if abs(event.delta) < 10 else -event.delta // 120
+        if event.state & 0x1:  # Shift scrolls horizontally
+            self.canvas.xview_scroll(step, "units")
+        else:
+            self.canvas.yview_scroll(step, "units")
+
+    def on_canvas_resize(self, event):
+        if self.display_image is None:
+            self.canvas.coords(self.hint_id, event.width / 2, event.height / 2)
+        elif self.fit_mode:
+            self.zoom_fit()
+        else:
+            self.render()
+
+    def render(self):
+        """Draw display_image at the current zoom, centered if smaller than the canvas."""
+        iw, ih = self.display_image.size
+        w, h = max(1, round(iw * self.zoom)), max(1, round(ih * self.zoom))
+        resample = Image.Resampling.NEAREST if self.zoom > 1 else Image.Resampling.BILINEAR
+        shown = self.display_image.resize((w, h), resample)
+        self.tk_image = ImageTk.PhotoImage(shown)
+
+        cw, ch = self.canvas.winfo_width(), self.canvas.winfo_height()
+        self.img_offset = (max(0, (cw - w) // 2), max(0, (ch - h) // 2))
+        self.canvas.delete("hint")
+        if self.image_id is None:
+            self.image_id = self.canvas.create_image(0, 0, anchor=tk.NW, image=self.tk_image)
+        else:
+            self.canvas.itemconfig(self.image_id, image=self.tk_image)
+        self.canvas.coords(self.image_id, *self.img_offset)
+        self.canvas.configure(scrollregion=(
+            0, 0, max(cw, w), max(ch, h)))
+        self.zoom_label.config(text=f"{round(self.zoom * 100)}%")
 
     def update_sliders(self):
         # Clear existing sliders
@@ -130,8 +263,11 @@ class ValueStudyApp:
 
         # Convert back to PIL Image and update UI
         self.display_image = Image.fromarray(quantized_array, mode="L")
-        self.tk_image = ImageTk.PhotoImage(self.display_image)
-        self.image_label.config(image=self.tk_image, text="")
+        if self.fit_mode:
+            self.root.update_idletasks()
+            self.zoom_fit()
+        else:
+            self.render()
 
     def save_image(self):
         if self.display_image is None:

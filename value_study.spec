@@ -22,7 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='value_study',
+    name='Value Study',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -38,7 +38,8 @@ exe = EXE(
 )
 app = BUNDLE(
     exe,
-    name='value_study.app',
-    icon=None,
-    bundle_identifier=None,
+    name='Value Study.app',
+    icon='icon.icns',
+    bundle_identifier='com.alexyoung.valuestudy',
+    info_plist={'NSHighResolutionCapable': True},
 )
